@@ -1,21 +1,21 @@
 /**
  * BrowserAgent - Unified agent that handles all browser automation tasks
- * 
+ *
  * ## Streaming Architecture
- * 
- * Currently, BrowserAgent uses llm.invoke() which waits for the entire response before returning. 
+ *
+ * Currently, BrowserAgent uses llm.invoke() which waits for the entire response before returning.
  * With streaming:
  * - Users see the AI "thinking" in real-time
  * - Tool calls appear as they're being decided
  * - No long waits with blank screens
- * 
+ *
  * ### How Streaming Works in LangChain
- * 
+ *
  * Current approach (blocking):
  * ```
  * const response = await llm.invoke(messages);  // Waits for complete response
  * ```
- * 
+ *
  * Streaming approach:
  * ```
  * const stream = await llm.stream(messages);    // Returns immediately
@@ -23,9 +23,9 @@
  *   // Process each chunk as it arrives
  * }
  * ```
- * 
+ *
  * ### Stream Chunk Structure
- * 
+ *
  * Each chunk contains:
  * ```
  * {
@@ -34,7 +34,7 @@
  *   tool_call_chunks: []      // Progressive tool call building
  * }
  * ```
- * 
+ *
  * Tool calls build progressively in the stream:
  * - Chunk 1: { tool_call_chunks: [{ name: 'navigation_tool', args: '', id: 'call_123' }] }
  * - Chunk 2: { tool_call_chunks: [{ name: 'navigation_tool', args: '{"url":', id: 'call_123' }] }
@@ -66,6 +66,9 @@ import { createResultTool } from '@/lib/tools/result/ResultTool';
 import { createHumanInputTool } from '@/lib/tools/utils/HumanInputTool';
 import { createDateTool } from '@/lib/tools/utility/DateTool';
 import { createMCPTool } from '@/lib/tools/mcp/MCPTool';
+import { createMemoryTool } from '@/lib/tools/memory/MemoryTool';
+import { createMemoryAwarePlannerTool } from '@/lib/tools/memory/MemoryAwarePlannerTool';
+import { MemoryCategory } from '@/lib/memory/types';
 import { generateSystemPrompt, generateSingleTurnExecutionPrompt } from './BrowserAgent.prompt';
 import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 import { PLANNING_CONFIG } from '@/lib/tools/planning/PlannerTool.config';
@@ -105,13 +108,13 @@ export class BrowserAgent {
 
   // Outer loop is -- plan -> execute -> validate
   private static readonly MAX_STEPS_OUTER_LOOP = 100;
-  
+
   // Human input constants
-  private static readonly HUMAN_INPUT_TIMEOUT = 600000;  // 10 minutes
-  private static readonly HUMAN_INPUT_CHECK_INTERVAL = 500;  // Check every 500ms
+  private static readonly HUMAN_INPUT_TIMEOUT = 600000; // 10 minutes
+  private static readonly HUMAN_INPUT_CHECK_INTERVAL = 500; // Check every 500ms
 
   // Inner loop is -- execute TODOs, one after the other.
-  private static readonly MAX_STEPS_INNER_LOOP  = 30; 
+  private static readonly MAX_STEPS_INNER_LOOP = 30;
 
   // Tools that trigger glow animation when executed
   private static readonly GLOW_ENABLED_TOOLS = new Set([
@@ -128,24 +131,24 @@ export class BrowserAgent {
   private readonly executionContext: ExecutionContext;
   private readonly toolManager: ToolManager;
   private readonly glowService: GlowAnimationService;
-  private narrator?: NarratorService;  // Narrator service for human-friendly messages
+  private narrator?: NarratorService; // Narrator service for human-friendly messages
 
   constructor(executionContext: ExecutionContext) {
     this.executionContext = executionContext;
     this.toolManager = new ToolManager(executionContext);
     this.glowService = GlowAnimationService.getInstance();
     this.narrator = new NarratorService(executionContext);
-    
+
     this._registerTools();
   }
 
   // Getters to access context components
-  private get messageManager(): MessageManager { 
-    return this.executionContext.messageManager; 
+  private get messageManager(): MessageManager {
+    return this.executionContext.messageManager;
   }
-  
-  private get pubsub(): PubSub { 
-    return this.executionContext.getPubSub(); 
+
+  private get pubsub(): PubSub {
+    return this.executionContext.getPubSub();
   }
 
   /**
@@ -183,10 +186,15 @@ export class BrowserAgent {
         this._initializeExecution(task);
         // Route predefined plan through the multi-step strategy using initial plan
         const predefined = metadata!.predefinedPlan!;
-        this.pubsub.publishMessage(PubSub.createMessage(`Executing agent: ${predefined.name || 'Custom Agent'}`, 'thinking'));
+        this.pubsub.publishMessage(
+          PubSub.createMessage(`Executing agent: ${predefined.name || 'Custom Agent'}`, 'thinking')
+        );
         // Convert predefined steps to Plan structure
         const initialPlan: Plan = {
-          steps: predefined.steps.map(step => ({ action: step, reasoning: `Part of agent: ${predefined.name || 'Custom'}` }))
+          steps: predefined.steps.map((step) => ({
+            action: step,
+            reasoning: `Part of agent: ${predefined.name || 'Custom'}`
+          }))
         };
         if (predefined.goal) {
           this.messageManager.addHuman(`User's goal is: ${predefined.goal} and this is the task: ${task}`);
@@ -194,21 +202,20 @@ export class BrowserAgent {
         await this._executeMultiStepStrategy(task, initialPlan);
         await this._generateTaskResult(task);
         return;
-      }
-      else if (metadata?.executionMode === 'dynamic' && metadata?.source === 'newtab') {
+      } else if (metadata?.executionMode === 'dynamic' && metadata?.source === 'newtab') {
         // For tasks initiated from new tab, show the startup message with task
         this.pubsub.publishMessage(PubSub.createMessage(`Executing task: ${task}`, 'thinking'));
       }
 
       // 3. STANDARD FLOW: CLASSIFY task type
       const classification = await this._classifyTask(task);
-      
+
       // Clear message history if this is not a follow-up task
       if (!classification.is_followup_task) {
         this.messageManager.clear();
         this._initializeExecution(task);
       }
-      
+
       let message: string;
       if (classification.is_followup_task && this.messageManager.getMessages().length > 0) {
         message = 'Following up on previous task...';
@@ -233,9 +240,9 @@ export class BrowserAgent {
     } finally {
       // Cleanup narrator service
       this.narrator?.cleanup();
-      
+
       // No status subscription cleanup needed; cancellation is centralized via AbortController
-      
+
       // Ensure glow animation is stopped at the end of execution
       try {
         // Get all active glow tabs from the service
@@ -267,7 +274,7 @@ export class BrowserAgent {
     this.toolManager.register(createTodoManagerTool(this.executionContext));
     this.toolManager.register(createRequirePlanningTool(this.executionContext));
     this.toolManager.register(createDoneTool(this.executionContext));
-    
+
     // Navigation tools
     this.toolManager.register(createNavigationTool(this.executionContext));
     // Note: FindElementTool is no longer registered - InteractionTool now handles finding and interacting
@@ -275,12 +282,12 @@ export class BrowserAgent {
     this.toolManager.register(createScrollTool(this.executionContext));
     this.toolManager.register(createSearchTool(this.executionContext));
     this.toolManager.register(createRefreshStateTool(this.executionContext));
-    
+
     // Tab tools
     this.toolManager.register(createTabOperationsTool(this.executionContext));
     this.toolManager.register(createGroupTabsTool(this.executionContext));
     this.toolManager.register(createGetSelectedTabsTool(this.executionContext));
-    
+
     // Validation tool
     this.toolManager.register(createValidatorTool(this.executionContext));
 
@@ -290,13 +297,17 @@ export class BrowserAgent {
     this.toolManager.register(createExtractTool(this.executionContext));
     this.toolManager.register(createHumanInputTool(this.executionContext));
     this.toolManager.register(createDateTool(this.executionContext));
-    
+
+    // Memory tools for task continuity and learning
+    this.toolManager.register(createMemoryTool(this.executionContext));
+    this.toolManager.register(createMemoryAwarePlannerTool(this.executionContext));
+
     // Result tool
     this.toolManager.register(createResultTool(this.executionContext));
-    
+
     // MCP tool for external integrations
     this.toolManager.register(createMCPTool(this.executionContext));
-    
+
     // Register classification tool last with all tool descriptions
     const toolDescriptions = this.toolManager.getDescriptions();
     this.toolManager.register(createClassificationTool(this.executionContext, toolDescriptions));
@@ -310,7 +321,7 @@ export class BrowserAgent {
     }
 
     const args = { task };
-    
+
     try {
       // Tool start notification not needed in new pub-sub system
       const result = await classificationTool.func(args);
@@ -319,15 +330,15 @@ export class BrowserAgent {
       if (parsedResult.ok) {
         const classification = parsedResult.output;
         // Tool end notification not needed in new pub-sub system
-        return { 
+        return {
           is_simple_task: classification.is_simple_task,
-          is_followup_task: classification.is_followup_task 
+          is_followup_task: classification.is_followup_task
         };
       }
     } catch (error) {
       // Tool end notification not needed in new pub-sub system
     }
-    
+
     // Default to complex task on any failure
     return { is_simple_task: false, is_followup_task: false };
   }
@@ -339,7 +350,7 @@ export class BrowserAgent {
     // Debug: Executing as a simple task
 
     for (let attempt = 1; attempt <= BrowserAgent.MAX_STEPS_FOR_SIMPLE_TASKS; attempt++) {
-      this.checkIfAborted();  // Manual check in loop
+      this.checkIfAborted(); // Manual check in loop
 
       // Check for loop before continuing
       if (this._detectLoop()) {
@@ -355,32 +366,32 @@ export class BrowserAgent {
       const turnResult = await this._executeSingleTurn(instruction);
 
       if (turnResult.doneToolCalled) {
-        return;  // SUCCESS - task result will be generated in execute()
+        return; // SUCCESS - task result will be generated in execute()
       }
-      
+
       if (turnResult.requiresHumanInput) {
         // Human input requested - wait for response
         const humanResponse = await this._waitForHumanInput();
-        
+
         if (humanResponse === 'abort') {
           // Human aborted the task
           this.pubsub.publishMessage(PubSub.createMessage('❌ Task aborted by human', 'assistant'));
           throw new AbortError('Task aborted by human');
         }
-        
+
         // Human clicked "Done" - continue with next iteration
         this.pubsub.publishMessage(PubSub.createMessage('✅ Human completed manual action. Continuing...', 'thinking'));
         this.messageManager.addAI('Human has completed the requested manual action. Continuing with the task.');
-        
+
         // Clear human input state
         this.executionContext.clearHumanInputState();
-        
+
         // Continue to next attempt
         continue;
       }
-      
+
       // Note: require_planning_tool doesn't make sense for simple tasks
-      // but if called, we could escalate to complex strategy      
+      // but if called, we could escalate to complex strategy
     }
 
     throw new Error(`Task failed to complete after ${BrowserAgent.MAX_STEPS_FOR_SIMPLE_TASKS} attempts.`);
@@ -401,7 +412,9 @@ export class BrowserAgent {
       if (outer_loop_index === 0 && initialPlan) {
         // Use the provided initial plan without creating a new one
         plan = initialPlan;
-        this.pubsub.publishMessage(PubSub.createMessage(`Using predefined plan with ${initialPlan.steps.length} steps`, 'thinking'));
+        this.pubsub.publishMessage(
+          PubSub.createMessage(`Using predefined plan with ${initialPlan.steps.length} steps`, 'thinking')
+        );
       } else {
         // Create a new plan for subsequent iterations or when no initial plan
         plan = await this._createMultiStepPlan(task);
@@ -422,56 +435,58 @@ export class BrowserAgent {
 
       // 3. EXECUTE: Inner loop with one TODO per turn
       let inner_loop_index = 0;
-      
+
       // Continue while there are uncompleted tasks (- [ ]) in the markdown
       while (inner_loop_index < BrowserAgent.MAX_STEPS_INNER_LOOP && currentTodos.includes('- [ ]')) {
         this.checkIfAborted();
-        
+
         // Check for loop before continuing
         if (this._detectLoop()) {
           console.warn('Detected repetitive behavior. Breaking out of potential infinite loop.');
-          
+
           // break out of loop
-          throw new Error("Agent is stuck, please restart your task.");
+          throw new Error('Agent is stuck, please restart your task.');
         }
-        
+
         // Use the generateTodoExecutionPrompt for TODO execution
         const instruction = generateSingleTurnExecutionPrompt(task);
-        
+
         const turnResult = await this._executeSingleTurn(instruction);
         inner_loop_index++;
-        
+
         if (turnResult.doneToolCalled) {
           return; // Task fully complete - exit entire strategy
         }
-        
+
         if (turnResult.requirePlanningCalled) {
           // Agent explicitly requested re-planning
           console.log('Agent requested re-planning, breaking inner loop');
           break; // Exit inner loop to trigger re-planning
         }
-        
+
         if (turnResult.requiresHumanInput) {
           // Human input requested - wait for response
           const humanResponse = await this._waitForHumanInput();
-          
+
           if (humanResponse === 'abort') {
             // Human aborted the task
             this.pubsub.publishMessage(PubSub.createMessage('❌ Task aborted by human', 'assistant'));
             throw new AbortError('Task aborted by human');
           }
-          
+
           // Human clicked "Done" - add to message history and trigger re-planning
-          this.pubsub.publishMessage(PubSub.createMessage('✅ Human completed manual action. Re-planning...', 'thinking'));
+          this.pubsub.publishMessage(
+            PubSub.createMessage('✅ Human completed manual action. Re-planning...', 'thinking')
+          );
           this.messageManager.addAI('Human has completed the requested manual action. Continuing with the task.');
-          
+
           // Clear human input state
           this.executionContext.clearHumanInputState();
-          
+
           // Break inner loop to trigger re-planning
           break;
         }
-        
+
         // Update currentTodos for the next iteration
         if (todoTool) {
           const result = await todoTool.func({ action: 'get' });
@@ -488,7 +503,9 @@ export class BrowserAgent {
 
       // Add validation feedback for next planning cycle
       if (validationResult.suggestions.length > 0) {
-        const validationMessage = `Validation result: ${validationResult.reasoning}\nSuggestions: ${validationResult.suggestions.join(', ')}`;
+        const validationMessage = `Validation result: ${
+          validationResult.reasoning
+        }\nSuggestions: ${validationResult.suggestions.join(', ')}`;
         this.messageManager.addAI(validationMessage);
       }
 
@@ -507,11 +524,11 @@ export class BrowserAgent {
    */
   private async _executeSingleTurn(instruction: string): Promise<SingleTurnResult> {
     this.messageManager.addHuman(instruction);
-    
+
     // This method encapsulates the streaming logic
     const llmResponse = await this._invokeLLMWithStreaming();
 
-    console.log(`K tokens:\n${JSON.stringify(llmResponse, null, 2)}`)
+    console.log(`K tokens:\n${JSON.stringify(llmResponse, null, 2)}`);
 
     const result: SingleTurnResult = {
       doneToolCalled: false,
@@ -529,7 +546,6 @@ export class BrowserAgent {
       result.doneToolCalled = toolsResult.doneToolCalled;
       result.requirePlanningCalled = toolsResult.requirePlanningCalled;
       result.requiresHumanInput = toolsResult.requiresHumanInput;
-      
     } else if (llmResponse.content) {
       // If the AI responds with text, just add it to the history
       this.messageManager.addAI(llmResponse.content as string);
@@ -550,14 +566,14 @@ export class BrowserAgent {
     const stream = await llmWithTools.stream(message_history, {
       signal: this.executionContext.abortController.signal
     });
-    
+
     let accumulatedChunk: AIMessageChunk | undefined;
     let accumulatedText = '';
     let hasStartedThinking = false;
     let currentMsgId: string | null = null;
 
     for await (const chunk of stream) {
-      this.checkIfAborted();  // Manual check during streaming
+      this.checkIfAborted(); // Manual check during streaming
 
       if (chunk.content && typeof chunk.content === 'string') {
         // Start thinking on first real content
@@ -567,10 +583,10 @@ export class BrowserAgent {
           // Create message ID on first content chunk
           currentMsgId = PubSub.generateId('msg_assistant');
         }
-        
+
         // Stream thought chunk - will be handled via assistant message streaming
         accumulatedText += chunk.content;
-        
+
         // Publish/update the message with accumulated content in real-time
         if (currentMsgId) {
           this.pubsub.publishMessage(PubSub.createMessageWithId(currentMsgId, accumulatedText, 'thinking'));
@@ -578,19 +594,19 @@ export class BrowserAgent {
       }
       accumulatedChunk = !accumulatedChunk ? chunk : accumulatedChunk.concat(chunk);
     }
-    
+
     // Only finish thinking if we started and have content
     if (hasStartedThinking && accumulatedText.trim() && currentMsgId) {
       // Final publish with complete message (in case last chunk was missed)
       this.pubsub.publishMessage(PubSub.createMessageWithId(currentMsgId, accumulatedText, 'thinking'));
     }
-    
+
     if (!accumulatedChunk) return new AIMessage({ content: '' });
-    
+
     // Convert the final chunk back to a standard AIMessage
     return new AIMessage({
       content: accumulatedChunk.content,
-      tool_calls: accumulatedChunk.tool_calls,
+      tool_calls: accumulatedChunk.tool_calls
     });
   }
 
@@ -600,7 +616,7 @@ export class BrowserAgent {
       requirePlanningCalled: false,
       requiresHumanInput: false
     };
-    
+
     for (const toolCall of toolCalls) {
       this.checkIfAborted();
 
@@ -618,15 +634,18 @@ export class BrowserAgent {
 
       // Add the result back to the message history for context
       if (toolName === 'refresh_browser_state_tool' && parsedResult.ok) {
-        const simplifiedResult = JSON.stringify({ 
-          ok: true, 
-          output: "Emergency browser state refresh completed - full DOM analysis available" 
+        const simplifiedResult = JSON.stringify({
+          ok: true,
+          output: 'Emergency browser state refresh completed - full DOM analysis available'
         });
         this.messageManager.addTool(simplifiedResult, toolCallId);
         this.messageManager.addBrowserState(parsedResult.output);
       } else {
         this.messageManager.addTool(toolResult, toolCallId);
       }
+
+      // Store important tool results in memory (if memory is enabled)
+      await this._maybeStoreToolResultInMemory(toolName, toolResult, parsedResult);
 
       // Special handling for todo_manager_tool, replace existing todo list message
       if (toolName === 'todo_manager_tool' && parsedResult.ok && args.action === 'set') {
@@ -635,22 +654,21 @@ export class BrowserAgent {
         this.pubsub.publishMessage(PubSub.createMessage(markdown, 'thinking'));
       }
 
-
       if (toolName === 'done_tool' && parsedResult.ok) {
         result.doneToolCalled = true;
       }
-      
+
       if (toolName === 'require_planning_tool' && parsedResult.ok) {
         result.requirePlanningCalled = true;
       }
-      
+
       if (toolName === 'human_input_tool' && parsedResult.ok && parsedResult.requiresHumanInput) {
         result.requiresHumanInput = true;
         // Break from the loop immediately to handle human input
         break;
       }
     }
-    
+
     return result;
   }
 
@@ -670,14 +688,14 @@ export class BrowserAgent {
       // Throw with actual error from tool
       throw new Error(parsedResult.output || 'Planning failed');
     }
-    
+
     // Publish planner result
     if (parsedResult.output?.steps) {
       const message = `Created ${parsedResult.output.steps.length} step execution plan`;
       this.pubsub.publishMessage(PubSub.createMessage(message, 'thinking'));
       return { steps: parsedResult.output.steps };
     }
-    
+
     throw new Error('Invalid plan format - no steps returned');
   }
 
@@ -765,7 +783,7 @@ export class BrowserAgent {
         const status = validationData.isComplete ? 'Complete' : 'Incomplete';
         this.pubsub.publishMessage(PubSub.createMessage(`Task validation: ${status}`, 'thinking'));
       }
-      
+
       if (parsedResult.ok) {
         // Use the validation data from output
         const validationData = parsedResult.output;
@@ -779,7 +797,7 @@ export class BrowserAgent {
       // Publish validator error
       this.pubsub.publishMessage(PubSub.createMessage('Error in validator_tool: Validation failed', 'error'));
     }
-    
+
     return {
       isComplete: false,
       reasoning: 'Validation failed - continuing execution',
@@ -814,19 +832,16 @@ export class BrowserAgent {
     }
   }
 
-
   /**
    * Update TODOs from plan steps (replaces all existing TODOs)
    */
   private async _updateTodosFromPlan(plan: Plan): Promise<void> {
     const todoTool = this.toolManager.get('todo_manager_tool');
     if (!todoTool || plan.steps.length === 0) return;
-    
+
     // Convert plan steps to markdown TODO list
-    const markdown = plan.steps
-      .map(step => `- [ ] ${step.action}`)
-      .join('\n');
-    
+    const markdown = plan.steps.map((step) => `- [ ] ${step.action}`).join('\n');
+
     const args = { action: 'set' as const, todos: markdown };
     await todoTool.func(args);
   }
@@ -836,10 +851,11 @@ export class BrowserAgent {
    */
   private _handleExecutionError(error: unknown, task: string): void {
     // Check if this is a user cancellation - handle silently
-    const isUserCancellation = error instanceof AbortError || 
-                               this.executionContext.isUserCancellation() || 
-                               (error instanceof Error && error.name === "AbortError");
-    
+    const isUserCancellation =
+      error instanceof AbortError ||
+      this.executionContext.isUserCancellation() ||
+      (error instanceof Error && error.name === 'AbortError');
+
     if (isUserCancellation) {
       // Don't publish message here - already handled in _subscribeToExecutionStatus
       // when the cancelled status event is received
@@ -847,7 +863,7 @@ export class BrowserAgent {
       // Log error metric with details
       const errorMessage = error instanceof Error ? error.message : String(error);
       const errorType = error instanceof Error ? error.name : 'UnknownError';
-      
+
       Logging.logMetric('execution_error', {
         error: errorMessage,
         error_type: errorType,
@@ -855,7 +871,7 @@ export class BrowserAgent {
         mode: 'browse',
         agent: 'BrowserAgent'
       });
-      
+
       console.error('Execution error (already reported by tool):', error);
       throw error;
     }
@@ -869,17 +885,17 @@ export class BrowserAgent {
    */
   private _detectLoop(lookback: number = 8, threshold: number = 4): boolean {
     const messages = this.messageManager.getMessages();
-    
+
     // Need at least lookback messages to check
     if (messages.length < lookback) {
       return false;
     }
-    
+
     // Get the last N messages, filtering only AI/assistant messages
     const recentMessages = messages
       .slice(-lookback)
-      .filter(msg => msg._getType() === 'ai')
-      .map(msg => {
+      .filter((msg) => msg._getType() === 'ai')
+      .map((msg) => {
         // Normalize the content for comparison
         const content = typeof msg.content === 'string' ? msg.content : '';
         return content.trim().toLowerCase();
@@ -888,10 +904,11 @@ export class BrowserAgent {
     // Count occurrences of each message
     const messageCount = new Map<string, number>();
     for (const msg of recentMessages) {
-      if (msg) {  // Skip empty messages
+      if (msg) {
+        // Skip empty messages
         const count = messageCount.get(msg) || 0;
         messageCount.set(msg, count + 1);
-        
+
         // If any message appears threshold times or more, we have a loop
         if (count + 1 >= threshold) {
           console.warn(`Loop detected: Message "${msg.substring(0, 50)}..." repeated ${count + 1} times`);
@@ -902,7 +919,6 @@ export class BrowserAgent {
 
     return false;
   }
-
 
   /**
    * Handle glow animation for tools that interact with the browser
@@ -917,7 +933,7 @@ export class BrowserAgent {
     try {
       const currentPage = await this.executionContext.browserContext.getCurrentPage();
       const tabId = currentPage.tabId;
-      
+
       if (tabId && !this.glowService.isGlowActive(tabId)) {
         await this.glowService.startGlow(tabId);
         return true;
@@ -937,12 +953,12 @@ export class BrowserAgent {
   private async _waitForHumanInput(): Promise<'done' | 'abort' | 'timeout'> {
     const startTime = Date.now();
     const requestId = this.executionContext.getHumanInputRequestId();
-    
+
     if (!requestId) {
       console.error('No human input request ID found');
       return 'abort';
     }
-    
+
     // Subscribe to human input responses
     const subscription = this.pubsub.subscribe((event) => {
       if (event.type === 'human-input-response') {
@@ -952,34 +968,113 @@ export class BrowserAgent {
         }
       }
     });
-    
+
     try {
       // Poll for response or timeout
       while (!this.executionContext.shouldAbort()) {
         // Check if response received
         const response = this.executionContext.getHumanInputResponse();
         if (response) {
-          return response.action;  // 'done' or 'abort'
+          return response.action; // 'done' or 'abort'
         }
-        
+
         // Check timeout
         if (Date.now() - startTime > BrowserAgent.HUMAN_INPUT_TIMEOUT) {
-          this.pubsub.publishMessage(
-            PubSub.createMessage('⏱️ Human input timed out after 10 minutes', 'error')
-          );
+          this.pubsub.publishMessage(PubSub.createMessage('⏱️ Human input timed out after 10 minutes', 'error'));
           return 'timeout';
         }
-        
+
         // Wait before checking again
-        await new Promise(resolve => setTimeout(resolve, BrowserAgent.HUMAN_INPUT_CHECK_INTERVAL));
+        await new Promise((resolve) => setTimeout(resolve, BrowserAgent.HUMAN_INPUT_CHECK_INTERVAL));
       }
-      
+
       // Aborted externally
       return 'abort';
-      
     } finally {
       // Clean up subscription
       subscription.unsubscribe();
+    }
+  }
+  /**
+   * Store important tool results in memory for future reference
+   * @param toolName - Name of the tool that was executed
+   * @param result - Raw tool result
+   * @param parsedResult - Parsed tool result
+   */
+  private async _maybeStoreToolResultInMemory(toolName: string, result: string, parsedResult: any): Promise<void> {
+    const memoryManager = this.executionContext.getMemoryManager();
+    if (!memoryManager || !memoryManager.isEnabled()) {
+      return;
+    }
+
+    // Only store results for important tools and successful operations
+    const importantTools = new Set([
+      'extract_tool',
+      'search_tool',
+      'navigation_tool',
+      'planner_tool',
+      'validator_tool'
+    ]);
+
+    if (!importantTools.has(toolName) || !parsedResult.ok) {
+      return;
+    }
+
+    try {
+      let content = '';
+      let category = MemoryCategory.TOOL_RESULT;
+      let importance = 0.5;
+
+      // Customize storage based on tool type
+      switch (toolName) {
+        case 'extract_tool':
+          if (parsedResult.output?.data) {
+            content = `Extracted data: ${JSON.stringify(parsedResult.output.data).substring(0, 500)}`;
+            category = MemoryCategory.RESEARCH_DATA;
+            importance = 0.7;
+          }
+          break;
+
+        case 'search_tool':
+          if (parsedResult.output?.results) {
+            content = `Search results: ${JSON.stringify(parsedResult.output.results).substring(0, 500)}`;
+            category = MemoryCategory.SEARCH_RESULT;
+            importance = 0.8;
+          }
+          break;
+
+        case 'navigation_tool':
+          if (parsedResult.output?.url) {
+            content = `Successfully navigated to: ${parsedResult.output.url}`;
+            importance = 0.4;
+          }
+          break;
+
+        case 'planner_tool':
+          if (parsedResult.output?.steps) {
+            content = `Successful plan with ${parsedResult.output.steps.length} steps`;
+            category = MemoryCategory.SUCCESSFUL_PLAN;
+            importance = 0.8;
+          }
+          break;
+
+        case 'validator_tool':
+          if (parsedResult.output) {
+            content = `Validation result: ${JSON.stringify(parsedResult.output)}`;
+            importance = 0.6;
+          }
+          break;
+      }
+
+      if (content) {
+        await memoryManager.storeToolResult(toolName, parsedResult.output, true, {
+          category,
+          importance
+        });
+      }
+    } catch (error) {
+      // Don't fail the main execution if memory storage fails
+      Logging.log('BrowserAgent', `Failed to store tool result in memory: ${error}`, 'warning');
     }
   }
 }
