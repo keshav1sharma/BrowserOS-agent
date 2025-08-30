@@ -12,6 +12,7 @@ import { Logging } from '@/lib/utils/Logging'
 
 // Import for factory functions
 import { MemoryManager } from './MemoryManager';
+import { getMemoryConfig } from './config';
 
 // Types and schemas
 export type { MemoryEntry, MemoryMetadata, MemorySearchParams, MemorySearchResult, MemoryOperationResult, MemoryConfig, MemoryStats, TaskContext, AgentMemoryContext } from './types';
@@ -45,20 +46,35 @@ export function createMemoryManager(
  */
 export async function initializeMemorySystem(apiKey?: string, agentId?: string): Promise<MemoryManager | null> {
   try {
+    const memoryConfig = getMemoryConfig();
+
+    if (!memoryConfig.enabled) {
+      Logging.log('MemorySystem', 'Memory system is disabled via MEMORY_ENABLED environment variable');
+      return null;
+    }
+
+    const effectiveApiKey = apiKey || memoryConfig.apiKey;
+    
+    if (!effectiveApiKey) {
+      Logging.log('MemorySystem', 'Memory system disabled: No API key provided and MEM0_API_KEY not set');
+      return null;
+    }
+
     const memoryManager = createMemoryManager(
-      apiKey,
+      effectiveApiKey,
       {
-        enabled: true,
-        maxEntries: 1000,
-        retentionDays: 30,
-        autoCleanup: true,
-        enableCrossTab: true,
-        enableLearning: true
+        enabled: memoryConfig.enabled,
+        maxEntries: memoryConfig.maxEntries,
+        retentionDays: memoryConfig.retentionDays,
+        autoCleanup: memoryConfig.autoCleanup,
+        enableCrossTab: memoryConfig.enableCrossTab,
+        enableLearning: memoryConfig.enableLearning
       },
       agentId
     );
     
     await memoryManager.initialize();
+    Logging.log('MemorySystem', 'Memory system initialized successfully');
     return memoryManager;
   } catch (error) {
     Logging.log('MemorySystem', `Failed to initialize memory system: ${error instanceof Error ? error.message : 'Unknown error'}`);

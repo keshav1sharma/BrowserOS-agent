@@ -50,6 +50,10 @@ export function getMemoryConfig(): MemoryConfig {
   // Try to get API key from environment
   config.apiKey = process.env.MEM0_API_KEY;
 
+  // Check if memory is globally enabled/disabled via environment variable
+  if (process.env.MEMORY_ENABLED !== undefined) {
+    config.enabled = process.env.MEMORY_ENABLED === 'true';
+  }
 
   return config;
 }

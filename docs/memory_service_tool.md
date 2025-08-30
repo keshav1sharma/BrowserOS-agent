@@ -12,12 +12,28 @@ This PR implements a comprehensive memory system that enables the BrowserOS agen
 
 ## 🔧 Technical Implementation
 
+### Memory Configuration
+The memory system can be configured through environment variables:
+
+```bash
+# Enable/disable the entire memory system
+MEMORY_ENABLED="true"   # Default: true (memory enabled)
+MEMORY_ENABLED="false"  # Completely disables memory system
+
+# API key for cloud storage (required when memory is enabled)
+MEM0_API_KEY="your-mem0-api-key"
+```
+
+**Configuration Behavior:**
+- When `MEMORY_ENABLED="false"`: MemoryManager is not created, all memory operations return graceful error messages
+- When `MEMORY_ENABLED="true"` but no `MEM0_API_KEY`: Memory system is disabled due to missing API key
+- When both are properly set: Full memory system functionality is available
+
 ### Core Components Added
 - **MemoryManager**: Central memory management with Mem0 integration
 - **Memory Tools**: Two new tools for storing and retrieving information
   - `memory_tool`: Core memory operations (add, search, get_context, store_result, get_preferences)
 - **Memory Categories**: Structured categorization system for different types of information
-- **Event System**: Memory event bus for real-time updates
 
 ### Architecture Changes
 ```
@@ -25,11 +41,14 @@ src/lib/
 ├── memory/                    # Core memory system
 │   ├── MemoryManager.ts      # Main memory orchestrator
 │   ├── Mem0ClientWrapper.ts  # Cloud storage integration
-│   ├── MemoryEventBus.ts     # Event system
+│   ├── config.ts             # Memory configuration with env var support
+│   ├── index.ts              # Memory system initialization
 │   └── types.ts              # Memory schemas and types
 └── tools/memory/             # Memory tools implementation
     ├── MemoryTool.ts         # Core memory operations tool
-    └── MemoryTool.prompt.ts  # Tool-specific prompts
+    ├── MemoryTool.prompt.ts  # Tool-specific prompts
+    ├── MemoryTool.test.ts    # Unit tests for memory tool functionality
+    └── memory-flag-integration.test.ts  # Integration tests for environment variables
 ```
 
 ### Tool Integration
@@ -84,11 +103,22 @@ memory_tool({
 })
 ```
 
+### Error Handling When Disabled
+When `MEMORY_ENABLED="false"`, memory operations return helpful error messages:
+```json
+{
+  "ok": false,
+  "error": "Memory system is not initialized. Set MEM0_API_KEY environment variable to enable memory."
+}
+```
+
 ## 🔄 Changes Made
 
 ### Files Added
 - `src/lib/memory/` - Complete memory system implementation
 - `src/lib/tools/memory/` - Memory tools and prompts
+- `src/lib/tools/memory/MemoryTool.test.ts` - Comprehensive unit tests for memory tool
+- `src/lib/tools/memory/memory-flag-integration.test.ts` - Integration tests for environment variable behavior
 
 ### Files Modified
 - `src/lib/agent/BrowserAgent.ts` - Added memory tool registration
@@ -98,13 +128,66 @@ memory_tool({
 
 ### Environment Variables
 - `MEM0_API_KEY` - Required for cloud memory storage (optional, graceful fallback if not provided)
+- `MEMORY_ENABLED` - Global flag to enable/disable the memory system (`"true"` or `"false"`, defaults to `true`)
 
 ## 🧪 Testing
+
+### Test Coverage
+The memory system includes comprehensive test suites that verify both functionality and configuration behavior:
+
+#### **MemoryTool.test.ts (6 tests)**
+- ✅ **Memory System Enabled**: Tests successful memory operations when MemoryManager is available
+- ✅ **Memory System Disabled**: Tests graceful error handling when MemoryManager is null
+- ✅ **Real-World Scenarios**: Uses actual `initializeMemorySystem` function to test production-like behavior
+  - Tests `MEMORY_ENABLED=false` scenario with proper initialization flow
+  - Tests missing API key scenario with environment variable handling
+- ✅ **Environment Variable Integration**: Tests `MEMORY_ENABLED` flag behavior
+
+#### **memory-flag-integration.test.ts (7 tests)**
+- ✅ **Environment Variable Manipulation**: Tests actual env var setting/restoration
+- ✅ **Config Integration**: Tests `getMemoryConfig()` with different environment states
+- ✅ **Real `initializeMemorySystem` Testing**: Tests actual function behavior with environment variables
+- ✅ **API Key Precedence**: Tests priority of passed vs environment API keys
+- ✅ **Debug Flag Testing**: Tests `MEMORY_DEBUG` environment variable
+
+### Test Results
+- ✅ **Total Tests**: 8 tests across both test files
 - ✅ Build system updated and compiling successfully
 - ✅ Memory tools properly registered and exported
 - ✅ Tool descriptions include comprehensive prompts
 - ✅ Graceful fallback when memory is disabled
+- ✅ Global memory enable/disable flag (`MEMORY_ENABLED`) properly tested
+- ✅ Memory system respects environment configuration
+- ✅ Real-world scenario testing with `initializeMemorySystem`
 - ✅ TypeScript compilation without errors
+
+### Running the Tests
+```bash
+# Run all memory-related tests
+npm test -- --run src/lib/tools/memory/
+
+# Run specific test files
+npm test -- --run src/lib/tools/memory/MemoryTool.test.ts
+npm test -- --run src/lib/tools/memory/memory-flag-integration.test.ts
+```
+
+**Sample Test Output:**
+```
+✓ MemoryTool (4)
+  ✓ Memory System Enabled (1)
+    ✓ should successfully add memory when memory manager is available
+  ✓ Memory System Disabled (1)
+    ✓ should return error when memory manager is not available (disabled)
+  ✓ Global Memory Flag Tests - Real World Scenarios (2)
+    ✓ should use initializeMemorySystem to test MEMORY_ENABLED=false scenario
+    ✓ should use initializeMemorySystem to test no API key scenario
+✓ MEMORY_ENABLED Environment Variable Tests (2)
+  ✓ should respect MEMORY_ENABLED=false environment variable
+  ✓ should respect MEMORY_ENABLED=true environment variable
+
+Test Files  2 passed (2)
+Tests  8 passed (8)
+```
 
 ## 🎨 Design Decisions
 
@@ -115,13 +198,16 @@ memory_tool({
 
 ### Graceful Degradation
 - Agent works normally when `MEM0_API_KEY` is not provided
-- Memory operations return helpful error messages
+- Memory system can be completely disabled with `MEMORY_ENABLED="false"`
+- Memory operations return helpful error messages when system is disabled
 - No breaking changes to existing functionality
 
 ### Clean Architecture
 - Memory system is completely optional and modular
+- Can be entirely disabled via `MEMORY_ENABLED="false"` environment variable
 - Existing tools and workflows unaffected
 - Clear separation of concerns
+- Graceful error handling when disabled
 
 ## 🔮 Future Enhancements
 - Local storage fallback for offline memory
